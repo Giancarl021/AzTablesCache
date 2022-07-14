@@ -176,6 +176,16 @@ public class CacheService
 
         return tableClient;
     }
+    private DateTime? GetExpiration(TableEntity entity)
+    {
+        string expirationString = entity["Expiration"].ToString() ?? string.Empty;
+
+        DateTime? expiration = expirationString != ExpirationNullValue ?
+            DateTime.Parse(expirationString) :
+            null;
+
+        return expiration;
+    }
     private TableEntity SerializeValue(string key, CacheServiceInternalItem item)
     {
         var entity = new TableEntity(_partitionKey, key);
@@ -198,11 +208,7 @@ public class CacheService
         if (entity.PartitionKey != _partitionKey)
             throw new Exception("Partition key mismatch");
 
-        string expirationString = entity["Expiration"].ToString() ?? string.Empty;
-
-        DateTime? expiration = expirationString != ExpirationNullValue ?
-            DateTime.Parse(expirationString) :
-            null;
+        var expiration = GetExpiration(entity);
 
         var dict = new Dictionary<string, string>();
 
@@ -238,6 +244,12 @@ public class CacheService
             foreach (var item in items.Values)
             {
                 if (item == null) continue;
+                var expiration = GetExpiration(item);
+                if (expiration != null && DateTime.Now >= expiration.GetValueOrDefault())
+                {
+                    await table.DeleteEntityAsync(item.PartitionKey, item.RowKey);
+                    continue;
+                }
                 await predicate(table, item);
             }
         }
@@ -246,9 +258,12 @@ public class CacheService
     {
         TableClient table = await GetTableClient();
 
-        foreach (var item in _data)
+        var iterator = _data.ToArray();
+
+        foreach (var item in iterator)
         {
-            await predicate(table, item.Key, item.Value);
+            if (Has(item.Key))
+                await predicate(table, item.Key, item.Value);
         }
     }
 }
