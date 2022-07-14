@@ -69,25 +69,32 @@ public class CacheService
     /// <returns>A Task that will be completed when the synchronization finish</returns>
     public async Task Synchronize(CacheServiceMergeMode mode = CacheServiceMergeMode.LocalMerge)
     {
+        Func<TableClient, TableEntity, Task> fillLocal = (table, item) => {
+            _data[item.RowKey] = DeserializeValue(item);
+            return Task.CompletedTask;
+        };
+        Func<TableClient, string, CacheServiceInternalItem, Task> fillRemote = (table, key, value) =>
+            table.UpsertEntityAsync(SerializeValue(key, value));
+        Func <TableClient, TableEntity, Task> clearRemote = (table, item) =>
+            table.DeleteEntityAsync(item.PartitionKey, item.RowKey);
+
         switch (mode)
         {
             case CacheServiceMergeMode.LocalReplace:
-                await ForEachRemoteItem(
-                    (table, item) => table.DeleteEntityAsync(item.PartitionKey, item.RowKey)
-                );
-                
-                await ForEachLocalItem(
-                    (table, key, value) => table.AddEntityAsync(SerializeValue(key, value))
-                );
+                await ForEachRemoteItem(clearRemote);
+                await ForEachLocalItem(fillRemote);
                 break;
             case CacheServiceMergeMode.RemoteReplace:
                 _data.Clear();
-                // Sync
+                await ForEachRemoteItem(fillLocal);
                 break;
             case CacheServiceMergeMode.LocalMerge:
-
+                await ForEachLocalItem(fillRemote);
+                await ForEachRemoteItem(fillLocal);
                 break;
             case CacheServiceMergeMode.RemoteMerge:
+                await ForEachRemoteItem(fillLocal);
+                await ForEachLocalItem(fillRemote);
                 break;
         }
     }
@@ -128,17 +135,16 @@ public class CacheService
     /// Get a value from the local cache
     /// </summary>
     /// <param name="key">The key of the cache value</param>
-    /// <typeparam name="T">The type of the requested item, must be a subtype of <see cref="CacheServiceItem"></see></typeparam>
     /// <returns>The requested cache value</returns>
     /// <exception cref="CacheItemNotFoundException"></exception>
-    public T Get<T>(string key) where T : CacheServiceItem
+    public Dictionary<string, string> Get(string key)
     {
         if (!Has(key))
             throw new CacheItemNotFoundException($"Cache item with key \"{key}\" not found");
         
         var item = _data[key];
 
-        return (T)item.Value;
+        return item.Value;
     }
     /// <summary>
     /// Set or update a value in the local cache
@@ -146,8 +152,7 @@ public class CacheService
     /// <param name="key">The key of the cache value</param>
     /// <param name="value">The value of the cache value</param>
     /// <param name="expiration">The expiration time of the cache value</param>
-    /// <typeparam name="T">The type of the requested item, must be a subtype of <see cref="CacheServiceItem"></see></typeparam>
-    public void Set<T>(string key, T value, TimeSpan? expiration) where T : CacheServiceItem
+    public void Set(string key, Dictionary<string, string> value, TimeSpan? expiration)
     {
         var item = new CacheServiceInternalItem(
             value: value,
@@ -163,8 +168,7 @@ public class CacheService
     /// </summary>
     /// <param name="key">The key of the cache value</param>
     /// <param name="value">The value of the cache value</param>
-    /// <typeparam name="T">The type of the requested item, must be a subtype of <see cref="CacheServiceItem"></see></typeparam>
-    public void Set<T>(string key, T value) where T : CacheServiceItem => Set(key, value, _defaultExpirationTime);
+    public void Set(string key, Dictionary<string, string> value) => Set(key, value, _defaultExpirationTime);
     private async Task<TableClient> GetTableClient()
     {
         TableClient tableClient = _client.GetTableClient(_tableName);
@@ -177,16 +181,48 @@ public class CacheService
         var entity = new TableEntity(_partitionKey, key);
         
         entity.Add("Expiration", item.Expiration?.ToString("o") ?? ExpirationNullValue);
-
-        var keys = item.Value.FlattenKeys();
         
-        foreach (var (name, data) in keys)
+        foreach (var (name, value) in item.Value)
         {
-            if (name == null || data == null) continue;
-            entity.Add(name, data);
+            if (name == null || value == null) continue;
+            entity.Add(name, value);
         }
 
         return entity;
+    }
+    private CacheServiceInternalItem DeserializeValue(TableEntity entity)
+    {
+        if (!entity.ContainsKey("Expiration"))
+            throw new Exception("Expiration key not found");
+        
+        if (entity.PartitionKey != _partitionKey)
+            throw new Exception("Partition key mismatch");
+
+        string expirationString = entity["Expiration"].ToString() ?? string.Empty;
+
+        DateTime? expiration = expirationString != ExpirationNullValue ?
+            DateTime.Parse(expirationString) :
+            null;
+
+        var dict = new Dictionary<string, string>();
+
+        foreach(var key in entity.Keys)
+        {
+            if (key == "Expiration" ||
+                key == "PartitionKey" ||
+                key == "RowKey"
+            ) continue;
+
+            var value = entity[key]?.ToString();
+
+            if (value == null) continue;
+
+            dict[key] = value;
+        }
+
+        var item = new CacheServiceInternalItem(dict, expiration);
+
+        return item;
     }
     private async Task ForEachRemoteItem(Func<TableClient, TableEntity, Task> predicate)
     {
