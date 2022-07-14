@@ -39,7 +39,7 @@ You can get this package on [Nuget](https://www.nuget.org/packages/AzTablesCache
 
 ### Importing
 
-Fiirst you need to import the package using the `using` keyword:
+First you need to import the package using the `using` keyword:
 
 ```csharp
 using AzTablesCache;
